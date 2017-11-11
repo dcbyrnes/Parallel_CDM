@@ -19,8 +19,8 @@ terra get_dimensions(f : &c.FILE, d : &uint32)
     c.fscanf(f, "%d %d \n", &d[0], &d[1])
 end
 
-terra read_data(f : &c.FILE, n : uint64, input : &double)
-    var x : double, y : double
+terra read_data(f : &c.FILE, n : uint64, input : &float)
+    var x : float, y : float
     for  i = 0, n do
         c.fscanf(f, "%lf", &input[i]) 
     end
@@ -124,12 +124,12 @@ task update_rule(x             : region(Vector),
 end
 
 -- Helper funtion to print vectors.
-task print(x : region(Vector))
+task print(x : region(ispace(int1d), float))
     where 
         reads(x)
     do
     for e in x do
-        c.printf("%f \n", e.i)
+        c.printf("%f \n", e)
     end
 end
 
@@ -137,8 +137,8 @@ end
 -- differentiable convex functions. 
 task toplevel()
     -- Load data from file.
-    var f_in = c.fopen("./project/Parallel_CDM/data/INPUT_MATRIX", "rb")
-    var f_out = c.fopen("./project/Parallel_CDM/data/OUTPUT_DATA", "rb")
+    var f_in = c.fopen("./project/Parallel_SVM/data/INPUT_MATRIX", "rb")
+    var f_out = c.fopen("./project/Parallel_SVM/data/OUTPUT_DATA", "rb")
     var dim : uint32[2]
     get_dimensions(f_in, dim)
     var nrows : uint64 = dim[0] -- Dimension of output vector.
@@ -146,8 +146,8 @@ task toplevel()
     c.printf("n: %d m: %d \n", nrows, ncols)
 
     -- Create region Matrix (A).
-    var A = region(ispace(int2d, { x = nrows, y = ncols }), double)
-    var data : double[2]
+    var A = region(ispace(int2d, { x = nrows, y = ncols }), float)
+    var data : float[2]
     for i = 0, nrows do
         read_data(f_in, ncols, data)
         for j = 0, ncols do
@@ -156,25 +156,26 @@ task toplevel()
         end
     end
     
+    var is_m = ispace(int1d, nrows)
+    var is_n = ispace(int1d, ncols)
     -- Create output vector (y).
-    var output_data : double[2]
+    var output_data : float[2]
     read_data(f_out, nrows, output_data)
-    var y = region(ispace(ptr, nrows), Vector)
-    for j = 0, nrows do
-       y[j].i = output_data[j] 
+    var y = region(is_m, float)
+    for c in is_m do
+       y[c] = output_data[c] 
     end
 
     -- Use (parallel/distributed) coordinate descent to solve Ax=y.
-    var x = region(ispace(ptr, ncols), Vector)
-    var d = region(ispace(ptr, ncols), Vector)
+    var x = region(is_n, float)
+    var d = region(is_n, float)
     -- Initialize iterate vector x.
-    for e in x do
-        e.i = 0
-        d[e].i = 0
+    for c in is_n do
+        x[c] = 10
+        d[c] = 0
     end
-    c.printf("Printing...\n")
     print(x)
-    
+    --[[
     var delta : double = 1000
     var learning_rate : float = 0.05
     var counter : uint64 = 0
@@ -198,7 +199,7 @@ task toplevel()
     print(x)
     --c.printf("%f \n", norm(x))
     --c.printf("Minimized objective: %f \n", func(y))
-
+    --]]
 end
 
 regentlib.start(toplevel)
