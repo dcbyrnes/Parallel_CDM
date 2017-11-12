@@ -1,2 +1,2 @@
-# parallel_cdm
-Parallel Coordinate Descent Method 
+# parallel_svm
+Parallel support vector machine

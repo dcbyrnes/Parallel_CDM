@@ -86,52 +86,80 @@ end
 
 task toplevel()
     -- Load data from file.
-    var f_in = c.fopen("./data/INPUT_MATRIX", "rb")
-    var f_out = c.fopen("./data/OUTPUT_DATA", "rb")
+    var f_in = c.fopen("./data/toy_examples/data_a.txt", "rb")
+    --var f_in = c.fopen("./data/toy_examples/INPUT_MATRIX", "rb")
+    var f_out = c.fopen("./data/toy_examples/OUTPUT_DATA", "rb")
     var dim : uint32[2]
     get_dimensions(f_in, dim)
     var nrows : uint64 = dim[0] -- Dimension of output vector.
     var ncols : uint64 = dim[1] -- Dimension of feature vector.
+    var is_m = ispace(int1d, nrows)
+    var is_n = ispace(int1d, ncols) -- Bias term included.
     c.printf("n: %d m: %d \n", nrows, ncols)
 
-    -- Create region Matrix (A).
-    var A = region(ispace(int2d, { x = nrows, y = ncols }), float)
+    -- Create region Matrix (A) and response vector (y).
+    var A = region(ispace(int2d, { x = nrows, y = (ncols-1) }), float)
+    var y = region(is_m, float)
     var data : float[2]
     for i = 0, nrows do
         read_data(f_in, ncols, data)
         for j = 0, ncols do
-            A[{i,j}] = data[j]
-            c.printf("data: %f\n", A[{i,j}])
+            if j == 0 then
+                y[i] = data[j]
+                c.printf("%f --->   ", y[i])
+            else
+                A[{i,j-1}] = data[j]
+                c.printf("%f ", A[{i,j-1}])
+            end
         end
+        c.printf("\n")
     end
-    var is_m = ispace(int1d, nrows)
-    var is_n = ispace(int1d, ncols)
-
+--[[
     -- Create output vector (y).
     var output_data : float[2]
     read_data(f_out, nrows, output_data)
     var y = region(is_m, float)
-    for i = 0, nrows do
-      y[i] = output_data[i] 
+    for i in is_m do
+      --y[i] = output_data[i] 
     end
-    
+--]]
     c.fclose(f_in)
     c.fclose(f_out)
 
-    -- Use (parallel/distributed) coordinate descent to solve Ax=y.
-    var x = region(is_n, float)
-    var d = region(is_n, float)
-    -- Initialize iterate vector x.
+    -- Minimize the (hinge) loss function.
+    var w = region(is_n, float)
+    -- Initialize weight vector (w).
     for i in is_n do
-        x[i] = 10
-        d[i] = 1
+        -- TODO(DB) remove this hack and cast the proper way.
+        w[i] = c.rand() / (c.RAND_MAX-1.3)
     end
 
     var eta : float = 1
-    var b : float = 1.0
-    var lam : float = 0.5
-    hl_grad(is_n, d, x, b, -1, lam, eta)
-    print(is_n, d) 
+    var b : float = 0
+    var lam : float = 0.005
+
+    -- TODO(db) Iterate over partition of A.
+    var rs = ispace(int2d, { x = nrows, y = 1 })
+    var parx = partition(equal, A, rs)
+    var x = region(is_n, float)
+    for r = 0, nrows do
+        -- TODO(db) Another hack.
+        x[0] = 1.0
+        for i = 0, ncols-1 do
+            x[i+1] = A[{r, i}]
+            --c.printf("H: %d %f \n", i, x[i+1])
+        end
+        --print(is_n, x)
+        -- Use the hinge loss to compute weight vector (w).
+        hl_grad(is_n, w, x, b, y[r], lam, eta)
+        --print(is_n, w) 
+    end
+    print(is_n, w) 
+    
+    var converged = false
+    --while not converged do
+
+    --end
 end
 
 regentlib.start(toplevel)
