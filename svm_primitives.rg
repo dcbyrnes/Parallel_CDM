@@ -1,5 +1,8 @@
 import "regent"
 
+-- Helper module to parse data stored in libsvm format. 
+local DataFile = require("libsvm_format_parser")
+
 -- C APIs
 local c = regentlib.c
 
@@ -49,6 +52,7 @@ where
     reads(x, w)
 do
     var f_ : float = 0.0
+    -- TODO(db) How do I vectorize this? 
     --__demand(__vectorize)
     for i in is do
         f_ += x[i] * w[i]
@@ -86,31 +90,53 @@ end
 
 task toplevel()
     -- Load data from file.
-    var f_in = c.fopen("./data/toy_examples/data_a.txt", "rb")
     --var f_in = c.fopen("./data/toy_examples/INPUT_MATRIX", "rb")
-    var f_out = c.fopen("./data/toy_examples/OUTPUT_DATA", "rb")
+    --var f_out = c.fopen("./data/toy_examples/OUTPUT_DATA", "rb")
+    --var f_in = c.fopen("./data/toy_examples/data_a.txt", "rb")
+    var FILE_NAME = "./data/toy_examples/test_read.txt"
+    var f_in = c.fopen(FILE_NAME, "rb")
     var dim : uint32[2]
     get_dimensions(f_in, dim)
     var nrows : uint64 = dim[0] -- Dimension of output vector.
     var ncols : uint64 = dim[1] -- Dimension of feature vector.
+    
+    var datafile : DataFile
+    datafile.filename = FILE_NAME
+    datafile.num_instances = nrows
+    datafile:parse()
+    c.printf("Label: %f \n", datafile.instance[0].label)
+    for i = 0, datafile.num_instances do
+        for j = 0, datafile.instance[i].num_entries do
+            c.printf("[%f] At index %d \n", 
+                    datafile.instance[i].value[j], 
+                    datafile.instance[i].indices[j])
+        end
+        c.printf("\n")
+    end 
     var is_m = ispace(int1d, nrows)
     var is_n = ispace(int1d, ncols) -- Bias term included.
     c.printf("n: %d m: %d \n", nrows, ncols)
 
     -- Create region Matrix (A) and response vector (y).
     var A = region(ispace(int2d, { x = nrows, y = (ncols-1) }), float)
+    fill(A, 0)
     var y = region(is_m, float)
-    var data : float[2]
+    var data : &float = [&float](c.malloc(ncols * [sizeof(float)]))
     for i = 0, nrows do
-        read_data(f_in, ncols, data)
-        for j = 0, ncols do
-            if j == 0 then
+        --read_data(f_in, ncols, data)
+        y[i] = datafile.instance[i].label
+        c.printf("label: %f \n", y[i])
+        for j = 0, datafile.instance[i].num_entries do
+            --[[if j == 0 then
                 y[i] = data[j]
                 c.printf("%f --->   ", y[i])
             else
-                A[{i,j-1}] = data[j]
+                A[{ i,  j-1 }] = data[j]
                 c.printf("%f ", A[{i,j-1}])
-            end
+            end--]]
+            A[{i, datafile.instance[i].indices[j]}] = datafile.instance[i].value[j]
+            c.printf("%f \n", A[{i, datafile.instance[i].indices[j]}])
+            --c.printf("%f \n", datafile.instance[i].value[j])
         end
         c.printf("\n")
     end
@@ -124,17 +150,17 @@ task toplevel()
     end
 --]]
     c.fclose(f_in)
-    c.fclose(f_out)
+    --c.fclose(f_out)
 
     -- Minimize the (hinge) loss function.
     var w = region(is_n, float)
     -- Initialize weight vector (w).
     for i in is_n do
         -- TODO(DB) remove this hack and cast the proper way.
-        w[i] = c.rand() / (c.RAND_MAX-1.3)
+        w[i] = [float](c.rand() / (c.RAND_MAX))
     end
 
-    var eta : float = 1
+    var eta : float = 0.05
     var b : float = 0
     var lam : float = 0.005
 
@@ -142,24 +168,28 @@ task toplevel()
     var rs = ispace(int2d, { x = nrows, y = 1 })
     var parx = partition(equal, A, rs)
     var x = region(is_n, float)
-    for r = 0, nrows do
-        -- TODO(db) Another hack.
-        x[0] = 1.0
-        for i = 0, ncols-1 do
-            x[i+1] = A[{r, i}]
-            --c.printf("H: %d %f \n", i, x[i+1])
+    for i = 1,10 do
+        for r = 0, nrows do
+            -- TODO(db) Another hack.
+            x[0] = 1.0
+            for i = 0, ncols-1 do
+                x[i+1] = A[{r, i}]
+                --c.printf("H: %d %f \n", i, x[i+1])
+            end
+            --print(is_n, x)
+            -- Use the hinge loss to compute weight vector (w).
+            -- Currently using stochastic gradient descent. 
+            hl_grad(is_n, w, x, b, y[r], lam, eta)
+            --print(is_n, w) 
         end
-        --print(is_n, x)
-        -- Use the hinge loss to compute weight vector (w).
-        hl_grad(is_n, w, x, b, y[r], lam, eta)
-        --print(is_n, w) 
     end
     print(is_n, w) 
     
-    var converged = false
+    --var converged = false
     --while not converged do
 
     --end
+
 end
 
 regentlib.start(toplevel)

@@ -82,8 +82,8 @@ def main():
     plt.legend(loc='upper right')
     
     x = np.linspace(0,1.2,1000)
-    y = -(-5.79 + 7.539*x) / 4.935
-    plt.plot(x,y)
+    y = -(-11.26 + 12.159*x) / 10.395
+    plt.plot(x,y,'b')
     plt.title('SVM for Dataset A')
     plt.show()
 
