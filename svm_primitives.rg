@@ -5,6 +5,8 @@ local DataFile = require("libsvm_format_parser")
 
 -- C APIs
 local c = regentlib.c
+    
+MAX_ITERS = 10
 
 terra get_dimensions(f : &c.FILE, d : &uint32)
     c.fscanf(f, "%d %d \n", &d[0], &d[1])
@@ -44,10 +46,10 @@ do
 end
 
 -- Returns evaluation of linear function f(x) = w^T x + b.
+-- Note: the bias term is included in vector w.
 task f(is : ispace(int1d),
        w  : region(ispace(int1d), float),
-       x  : region(ispace(int1d), float),
-       b  : float)
+       x  : region(ispace(int1d), float))
 where 
     reads(x, w)
 do
@@ -57,35 +59,78 @@ do
     for i in is do
         f_ += x[i] * w[i]
     end
-    return (f_ + b)
+    return f_
 end
 
 -- Gradient of hinge loss function.
-task hl_grad(is  : ispace(int1d),
-             w   : region(ispace(int1d), float),
-             x   : region(ispace(int1d), float), 
-             b   : double,
-             y   : int32,
-             lam : float,
-             eta : float)
+-- is_c : index space for columns of A (dimension of input, n).
+-- is_r : index space for rows of A (dimension of output, m).
+task hl_grad(is_c  : ispace(int1d),
+             is_r  : ispace(int2d),
+             w     : region(ispace(int1d), float),
+             x     : region(ispace(int1d), float), 
+             y     : int32,
+             lam   : float,
+             eta   : float)
 where 
     reads(x), 
     reads writes (w)
 do
-    var z = region(is, float)
+    var z = region(is_c, float)
     fill(z, 0.0)
     -- z += (-eta * lam) * w_t.
-    saxpy(is, w, z, -eta * lam)
-    if (y * f(is,w,x,b) < 1) then
-        var z_ = region(is, float)
+    saxpy(is_c, w, z, -eta * lam)
+    if (y * f(is_c,w,x) < 1) then
+        var z_ = region(is_c, float)
         fill(z_, 0.0)
         -- z_ += -eta * y_i * x_i
-        saxpy(is, x, z_, -y * eta)
+        saxpy(is_c, x, z_, -y * eta)
         -- z += z
-        saxpy(is, z_, z, 1)
+        saxpy(is_c, z_, z, 1)
     end
     -- w += -z
-    saxpy(is, z, w, -1)
+    saxpy(is_c, z, w, -1)
+end
+
+-- Computes the accuracy of the SVM on the test dataset.
+-- is_c : Index space corresponding to parameter dimension.
+-- is_r : Index space corresponding to number of instances.  
+-- w : Support vector parameters.
+-- x : Sample data with n features.
+-- y : Correct classification of corresponding data instance.  
+task test_svm(is_c    : ispace(int1d),
+              is_r    : ispace(int1d),
+              w       : region(ispace(int1d), float),
+              data       : region(ispace(int2d), float), -- TODO: change this to int2d
+              label       : region(ispace(int1d), float))
+where 
+    reads(data, label, w)
+do
+    var acc : float = 0
+    var total : uint64 = 0
+    var x_ = region(is_c, float)
+    var y_ : float = 0
+    -- Iterate over the entire test set to compute accuracy. 
+    for ir in is_r do
+        fill(x_,0)
+        c.printf("%d\n", ir)
+        y_ =  label[ir]
+        for ic in x_.ispace do
+            c.printf("%f ", data[{ir,ic}]) 
+            x_[ic] = data[{ir,ic}]
+        end
+        total += 1
+        if (y_ * f(w.ispace, w, x_) > 1) then
+            c.printf("# %d is correct. \n", ir)
+            acc += 1.0 
+        else
+            c.printf("# %d is incorrect: %f -- %f. \n", ir, y_, f(w.ispace,w,x_))
+        end               
+    end
+    c.printf("# Correct: %f \n", acc)
+    acc = [float](acc / total)
+    c.printf("Accuracy: %f \n", acc)
+    return acc
 end
 
 task toplevel()
@@ -93,7 +138,7 @@ task toplevel()
     --var f_in = c.fopen("./data/toy_examples/INPUT_MATRIX", "rb")
     --var f_out = c.fopen("./data/toy_examples/OUTPUT_DATA", "rb")
     --var f_in = c.fopen("./data/toy_examples/data_a.txt", "rb")
-    var FILE_NAME = "./data/toy_examples/test_read.txt"
+    var FILE_NAME = "./data/toy_examples/ijcnn1.txt"
     var f_in = c.fopen(FILE_NAME, "rb")
     var dim : uint32[2]
     get_dimensions(f_in, dim)
@@ -103,9 +148,10 @@ task toplevel()
     var datafile : DataFile
     datafile.filename = FILE_NAME
     datafile.num_instances = nrows
+    datafile.instance = [&data](c.malloc(nrows * [sizeof(data)]))
     datafile:parse()
-    c.printf("Label: %f \n", datafile.instance[0].label)
     for i = 0, datafile.num_instances do
+        c.printf("Label: %f \n", datafile.instance[i].label)
         for j = 0, datafile.instance[i].num_entries do
             c.printf("[%f] At index %d \n", 
                     datafile.instance[i].value[j], 
@@ -113,83 +159,81 @@ task toplevel()
         end
         c.printf("\n")
     end 
-    var is_m = ispace(int1d, nrows)
-    var is_n = ispace(int1d, ncols) -- Bias term included.
+    var row_ispace = ispace(int1d, nrows)
+    var col_ispace = ispace(int1d, ncols) -- Bias term included.
     c.printf("n: %d m: %d \n", nrows, ncols)
 
-    -- Create region Matrix (A) and response vector (y).
-    var A = region(ispace(int2d, { x = nrows, y = (ncols-1) }), float)
-    fill(A, 0)
-    var y = region(is_m, float)
+    -- Create region Matrix (A) and response vector (labels).   
+    -- Note: Include bias term in A.
+    var A = region(ispace(int2d, { x = nrows, y = ncols }), float)
+    var labels = region(row_ispace, float)
+    fill(A, 0.0)
+    fill(labels, 0.0)
+
     var data : &float = [&float](c.malloc(ncols * [sizeof(float)]))
     for i = 0, nrows do
-        --read_data(f_in, ncols, data)
-        y[i] = datafile.instance[i].label
-        c.printf("label: %f \n", y[i])
+        A[{i, ncols-1}] = 1.0
+        labels[i] = datafile.instance[i].label
+        c.printf("Label: %f \n", labels[i])
         for j = 0, datafile.instance[i].num_entries do
-            --[[if j == 0 then
-                y[i] = data[j]
-                c.printf("%f --->   ", y[i])
-            else
-                A[{ i,  j-1 }] = data[j]
-                c.printf("%f ", A[{i,j-1}])
-            end--]]
             A[{i, datafile.instance[i].indices[j]}] = datafile.instance[i].value[j]
             c.printf("%f \n", A[{i, datafile.instance[i].indices[j]}])
-            --c.printf("%f \n", datafile.instance[i].value[j])
         end
         c.printf("\n")
     end
---[[
-    -- Create output vector (y).
-    var output_data : float[2]
-    read_data(f_out, nrows, output_data)
-    var y = region(is_m, float)
-    for i in is_m do
-      --y[i] = output_data[i] 
-    end
---]]
+    print(row_ispace, labels)
     c.fclose(f_in)
-    --c.fclose(f_out)
+   --c.fclose(f_out)
 
     -- Minimize the (hinge) loss function.
-    var w = region(is_n, float)
-    -- Initialize weight vector (w).
-    for i in is_n do
-        -- TODO(DB) remove this hack and cast the proper way.
-        w[i] = [float](c.rand() / (c.RAND_MAX))
+    var weights = region(col_ispace, float)
+    -- Initialize weights vector.
+    for i in col_ispace do
+        weights[i] = [float](c.rand() / (c.RAND_MAX))
     end
 
     var eta : float = 0.05
-    var b : float = 0
     var lam : float = 0.005
 
     -- TODO(db) Iterate over partition of A.
-    var rs = ispace(int2d, { x = nrows, y = 1 })
-    var parx = partition(equal, A, rs)
-    var x = region(is_n, float)
-    for i = 1,10 do
-        for r = 0, nrows do
-            -- TODO(db) Another hack.
-            x[0] = 1.0
-            for i = 0, ncols-1 do
-                x[i+1] = A[{r, i}]
-                --c.printf("H: %d %f \n", i, x[i+1])
+    var partitions = 2
+    var data_ispace = ispace(int2d, { partitions, 1 })
+    var label_ispace = ispace(int1d, partitions) 
+    var data_partition = partition(equal, A, data_ispace) -- Test/train data partition
+    var label_partition = partition(equal, labels, label_ispace) -- Test/train label partition.
+    var x = region(col_ispace, float)
+ 
+    var train = 0
+    var test = 1 
+    for block in data_ispace do
+        if (block == [int2d]{train,0}) then
+            c.printf("Training!\n")
+            for i = 0, MAX_ITERS do
+                c.printf("ITER: %d \n", i)
+                for r = 0, nrows do
+                    -- TODO(db) Remove this hack to copy rows from A to x.
+                    x[0] = 1.0
+                    for i = 0, ncols-1 do
+                        x[i+1] = A[{r, i}]
+                    end
+                    -- Use the hinge loss to compute weights vector.
+                    -- Currently using stochastic gradient descent. 
+                    hl_grad(col_ispace, data_ispace, weights, x, labels[r], lam, eta)
+                end
+                --[[for color in data_partition.colors do
+                hl_grad(col_ispace, block_row_ispace, weights, 
+                    data_partition[color], class_partition[color], lam, eta)--]]
             end
-            --print(is_n, x)
-            -- Use the hinge loss to compute weight vector (w).
-            -- Currently using stochastic gradient descent. 
-            hl_grad(is_n, w, x, b, y[r], lam, eta)
-            --print(is_n, w) 
+            print(col_ispace, weights) 
+        elseif (block == [int2d]{test,0}) then
+            c.printf("Testing! %f \n", labels[0])
+            test_svm(x.ispace, label_partition[1].ispace, weights, 
+                     data_partition[block], label_partition[1])
         end
+        --for d in data_partition[block] do
+            --c.printf("Block: %d     index: (%d, %d)       value: %f \n", block, d.x, d.y, A[d])
+        --end
     end
-    print(is_n, w) 
-    
-    --var converged = false
-    --while not converged do
-
-    --end
-
 end
 
 regentlib.start(toplevel)

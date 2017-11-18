@@ -14,7 +14,8 @@ struct data {
 struct DataFile {
     filename        : &int8,
     num_instances   : uint64,
-    instance        : data[256] 
+    --instance        : data[256] 
+    instance        : &data 
 }
 
 terra DataFile:parse()
@@ -33,7 +34,7 @@ terra DataFile:parse()
         var len : uint64
         var test : int8[256]
         c.fgets(test, 256, f_)
-        c.printf("Input String: %s \n", test)
+        --c.printf("Input String: %s \n", test)
         token_label = cstring.strtok_r(test, entry_delim, &pos)
         self.instance[i].label = c.atof(token_label)
         token_index = cstring.strtok_r(nil, index_delim, &pos)
@@ -41,7 +42,8 @@ terra DataFile:parse()
         var counter = 0
         while (token_value ~= nil) do
             if (token_index ~= nil) then
-                self.instance[i].indices[counter] = c.atoi(token_index)
+                -- Convert to 0-indexed format.
+                self.instance[i].indices[counter] = (c.atoi(token_index)-1)
             end
             if (token_value ~= nil) then
                 self.instance[i].value[counter] = c.atof(token_value)
