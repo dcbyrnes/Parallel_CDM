@@ -64,9 +64,7 @@ end
 
 -- Gradient of hinge loss function.
 -- is_c : index space for columns of A (dimension of input, n).
--- is_r : index space for rows of A (dimension of output, m).
 task hl_grad(is_c  : ispace(int1d),
-             is_r  : ispace(int2d),
              w     : region(ispace(int1d), float),
              x     : region(ispace(int1d), float), 
              y     : int32,
@@ -92,19 +90,55 @@ do
     saxpy(is_c, z, w, -1)
 end
 
+-- Trains a support vector machine.
+-- c_is : column index space.
+-- r_is : row index space.
+-- data : training data.
+-- labels : corresponding labels for training data instances. 
+task svm_train(c_is     : ispace(int1d),
+               r_is     : ispace(int1d),
+               data     : region(ispace(int2d), float),
+               labels   : region(ispace(int1d), float),
+               weights  : region(ispace(int1d), float))
+where 
+    reads(data, labels),
+    writes reads(weights)
+do
+    var eta : float = 0.05 --Step size. 
+    var lam : float = 0.005 --Regularization. 
+    -- Initialize weights vector.
+    for cc in c_is do
+        weights[cc] = [float](c.rand() / (c.RAND_MAX))
+    end
+    for i = 0, MAX_ITERS do
+        c.printf("Iteration #: %d \n", i)
+        var x = region(c_is, float)
+        for ri in r_is do
+            fill(x, 0.0)
+            for ci in c_is do
+                x[ci] = data[{ri, ci}]
+            end 
+            -- Uses the hinge loss to compute weight vector.
+            -- Currently using stochastic gradient descent. 
+            hl_grad(c_is, weights, x, labels[ri], lam, eta)
+        end
+    end
+    print(c_is, weights)
+end
+
 -- Computes the accuracy of the SVM on the test dataset.
 -- is_c : Index space corresponding to parameter dimension.
 -- is_r : Index space corresponding to number of instances.  
 -- w : Support vector parameters.
--- x : Sample data with n features.
--- y : Correct classification of corresponding data instance.  
-task test_svm(is_c    : ispace(int1d),
-              is_r    : ispace(int1d),
-              w       : region(ispace(int1d), float),
-              data       : region(ispace(int2d), float), -- TODO: change this to int2d
-              label       : region(ispace(int1d), float))
+-- data : Sample data with n features.
+-- lables : Correct classification of corresponding data instance.  
+task svm_test(is_c     : ispace(int1d),
+              is_r     : ispace(int1d),
+              w        : region(ispace(int1d), float),
+              data     : region(ispace(int2d), float), -- TODO: change this to int2d
+              labels   : region(ispace(int1d), float))
 where 
-    reads(data, label, w)
+    reads(data, labels, w)
 do
     var acc : float = 0
     var total : uint64 = 0
@@ -114,7 +148,7 @@ do
     for ir in is_r do
         fill(x_,0)
         c.printf("%d\n", ir)
-        y_ =  label[ir]
+        y_ =  labels[ir]
         for ic in x_.ispace do
             c.printf("%f ", data[{ir,ic}]) 
             x_[ic] = data[{ir,ic}]
@@ -135,9 +169,6 @@ end
 
 task toplevel()
     -- Load data from file.
-    --var f_in = c.fopen("./data/toy_examples/INPUT_MATRIX", "rb")
-    --var f_out = c.fopen("./data/toy_examples/OUTPUT_DATA", "rb")
-    --var f_in = c.fopen("./data/toy_examples/data_a.txt", "rb")
     var FILE_NAME = "./data/toy_examples/ijcnn1.txt"
     var f_in = c.fopen(FILE_NAME, "rb")
     var dim : uint32[2]
@@ -183,14 +214,6 @@ task toplevel()
     end
     print(row_ispace, labels)
     c.fclose(f_in)
-   --c.fclose(f_out)
-
-    -- Minimize the (hinge) loss function.
-    var weights = region(col_ispace, float)
-    -- Initialize weights vector.
-    for i in col_ispace do
-        weights[i] = [float](c.rand() / (c.RAND_MAX))
-    end
 
     var eta : float = 0.05
     var lam : float = 0.005
@@ -200,13 +223,16 @@ task toplevel()
     var data_ispace = ispace(int2d, { partitions, 1 })
     var label_ispace = ispace(int1d, partitions) 
     var data_partition = partition(equal, A, data_ispace) -- Test/train data partition
-    var label_partition = partition(equal, labels, label_ispace) -- Test/train label partition.
-    var x = region(col_ispace, float)
- 
+    var label_partition = partition(equal, labels, label_ispace) -- Test/train label partition. 
+    var weights = region(col_ispace, float)
+
     var train = 0
     var test = 1 
     for block in data_ispace do
         if (block == [int2d]{train,0}) then
+            svm_train(col_ispace, label_partition[train].ispace, 
+                      data_partition[block], label_partition[train], weights)
+            --[[
             c.printf("Training!\n")
             for i = 0, MAX_ITERS do
                 c.printf("ITER: %d \n", i)
@@ -218,22 +244,19 @@ task toplevel()
                     end
                     -- Use the hinge loss to compute weights vector.
                     -- Currently using stochastic gradient descent. 
-                    hl_grad(col_ispace, data_ispace, weights, x, labels[r], lam, eta)
+                    hl_grad(col_ispace, weights, x, labels[r], lam, eta)
                 end
-                --[[for color in data_partition.colors do
-                hl_grad(col_ispace, block_row_ispace, weights, 
-                    data_partition[color], class_partition[color], lam, eta)--]]
             end
-            print(col_ispace, weights) 
+            print(col_ispace, weights)--]] 
         elseif (block == [int2d]{test,0}) then
             c.printf("Testing! %f \n", labels[0])
-            test_svm(x.ispace, label_partition[1].ispace, weights, 
-                     data_partition[block], label_partition[1])
+            svm_test(col_ispace, label_partition[1].ispace, weights, 
+                     data_partition[block], label_partition[test])
         end
-        --for d in data_partition[block] do
-            --c.printf("Block: %d     index: (%d, %d)       value: %f \n", block, d.x, d.y, A[d])
-        --end
     end
 end
+--for d in data_partition[block] do
+    --c.printf("Block: %d     index: (%d, %d)       value: %f \n", block, d.x, d.y, A[d])
+--end
 
 regentlib.start(toplevel)
