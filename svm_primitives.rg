@@ -5,6 +5,8 @@ local DataFile = require("libsvm_format_parser")
 
 -- C APIs
 local c = regentlib.c
+local cmath = terralib.includec("math.h")
+sqrt = regentlib.sqrt(double)
     
 MAX_ITERS = 10
 
@@ -29,6 +31,36 @@ task print(is : ispace(int1d),
     for i in is do
         c.printf("%f \n", x[i])
     end
+end
+
+-- Copy the contents of row of 2D region to a 1D region (dimensions must agree).
+-- x : 1D region to fill.
+-- A : 2D region to copy from.
+-- row : specific row of 2D region to copy from. 
+task copy_row(x   : region(ispace(int1d), float),
+              A   : region(ispace(int2d), float),
+              row : uint64)
+where
+    reads(x, A), writes(x)
+do
+    __demand(__vectorize)
+    for j in x do
+        x[j] = A[{row, j}] 
+    end 
+end
+
+-- Returns the dot product of two vectors of equal length.
+task dot(is : ispace(int1d),
+         x  : region(ispace(int1d), float),
+         y  : region(ispace(int1d), float))
+where
+    reads(x, y), writes(y)
+do
+    var sum : float = 0
+    for i in is do
+        sum += (y[i] + x[i])
+    end
+    return sum
 end
 
 -- Sets y = a * x + y, where a is a scalar and x, y are vectors. 
@@ -88,6 +120,61 @@ do
     end
     -- w += -z
     saxpy(is_c, z, w, -1)
+end
+
+-- Builds the kernel matrix. 
+-- m : number of training examples. 
+task compute_kernel(m    : uint64,
+                    data : region(ispace(int2d), float))
+where
+    reads(data)
+do
+    var ker_is = ispace(int2d, {x = m, y = m}) 
+    var c_is = ispace(int1d, m)
+    var K = region(ker_is, float) 
+    var x = region(c_is, float)   
+    var y = region(c_is, float)   
+    var sig : float = 64.0
+    for i in c_is do
+        for j in c_is do
+            copy_row(x, data, i)
+            copy_row(y, data, j)
+            saxpy(c_is, x, y, -1)
+            var p = dot(c_is, y, y)
+            K[{i,j}] = cmath.exp(-p / 2*sig)
+        end
+    end
+    return K
+end
+
+-- Uses the dual formulation.
+-- is : column index space corresponding to number of training examples.
+-- m : number of training examples.
+task svm_train_dual(is      : ispace(int1d),
+                    M       : uint64,
+                    data    : region(ispace(int2d), float),
+                    labels  : region(ispace(int1d), float),
+                    alpha   : region(ispace(int1d), float))
+where 
+    reads(data, labels, alpha), writes(alpha)
+do
+    for ii in is do
+        var i = [int](M * (c.rand() / c.RAND_MAX))
+        var K = compute_kernel(M, data)
+        var grad = region(is, float)
+        var k_ = region(is, float)
+        for ic in is do
+            k_[ic] = 0--K[{i, ic}]
+            grad[ic] = 0--K[{i, ic}] * alpha[ic]
+        end
+        var margin = labels[i] * dot(is, k_, alpha) 
+        if (margin < 1) then
+            -- grad -= Y[i]*K[:,i] 
+            saxpy(is, k_, grad, -labels[i])
+        end
+        saxpy(is, grad, alpha, -1.0/sqrt(ii+1))
+    end
+    print(is, alpha)
 end
 
 -- Trains a support vector machine.
@@ -226,28 +313,16 @@ task toplevel()
     var label_partition = partition(equal, labels, label_ispace) -- Test/train label partition. 
     var weights = region(col_ispace, float)
 
+
     var train = 0
     var test = 1 
+    var alpha = region(label_partition[train].ispace, float)
     for block in data_ispace do
         if (block == [int2d]{train,0}) then
             svm_train(col_ispace, label_partition[train].ispace, 
                       data_partition[block], label_partition[train], weights)
-            --[[
-            c.printf("Training!\n")
-            for i = 0, MAX_ITERS do
-                c.printf("ITER: %d \n", i)
-                for r = 0, nrows do
-                    -- TODO(db) Remove this hack to copy rows from A to x.
-                    x[0] = 1.0
-                    for i = 0, ncols-1 do
-                        x[i+1] = A[{r, i}]
-                    end
-                    -- Use the hinge loss to compute weights vector.
-                    -- Currently using stochastic gradient descent. 
-                    hl_grad(col_ispace, weights, x, labels[r], lam, eta)
-                end
-            end
-            print(col_ispace, weights)--]] 
+            --[[svm_train_dual(alpha.ispace, nrows, 
+                           data_partition[block], label_partition[train], alpha)--]]
         elseif (block == [int2d]{test,0}) then
             c.printf("Testing! %f \n", labels[0])
             svm_test(col_ispace, label_partition[1].ispace, weights, 
@@ -255,8 +330,5 @@ task toplevel()
         end
     end
 end
---for d in data_partition[block] do
-    --c.printf("Block: %d     index: (%d, %d)       value: %f \n", block, d.x, d.y, A[d])
---end
 
 regentlib.start(toplevel)
