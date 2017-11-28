@@ -54,11 +54,11 @@ task dot(is : ispace(int1d),
          x  : region(ispace(int1d), float),
          y  : region(ispace(int1d), float))
 where
-    reads(x, y), writes(y)
+    reads(x, y)
 do
     var sum : float = 0
     for i in is do
-        sum += (y[i] + x[i])
+        sum += (y[i] * x[i])
     end
     return sum
 end
@@ -75,6 +75,25 @@ do
   for i in is do
     y[i] += a*x[i]
   end
+end
+
+-- Special version of saxpy where a linear combination of
+-- ROWS r1 and r2 of a 2D region are stored in y.
+task saxpy_2d(is    : ispace(int1d),
+              r1    : uint64,
+              r2    : uint64,
+              x     : region(ispace(int2d), float),
+              y     : region(ispace(int1d), float),
+              a     : float)
+where
+    reads(x, y), writes(y)
+do
+    __demand(__vectorize)
+    for i in is do 
+        y[i] = x[{r1,i}] + a*x[{r2,i}]
+        --c.printf("%f ", x[{r2,i}])  
+    end
+    --c.printf("\n")
 end
 
 -- Returns evaluation of linear function f(x) = w^T x + b.
@@ -124,56 +143,78 @@ end
 
 -- Builds the kernel matrix. 
 -- m : number of training examples. 
-task compute_kernel(m    : uint64,
-                    data : region(ispace(int2d), float))
+-- n : number of features. 
+task compute_kernel(m      : uint64,
+                    n      : uint64,
+                    data   : region(ispace(int2d), float),
+                    kernel : region(ispace(int2d), float))
 where
-    reads(data)
+    reads(data, kernel), writes(kernel)
 do
-    var ker_is = ispace(int2d, {x = m, y = m}) 
-    var c_is = ispace(int1d, m)
-    var K = region(ker_is, float) 
-    var x = region(c_is, float)   
-    var y = region(c_is, float)   
+    --var ker_is = ispace(int2d, {x = m, y = m}) 
+    var r_is = ispace(int1d, m)
+    var c_is = ispace(int1d, n)
+    var y = region(c_is, float) -- Same dimension as features (n).   
     var sig : float = 64.0
-    for i in c_is do
-        for j in c_is do
-            copy_row(x, data, i)
-            copy_row(y, data, j)
-            saxpy(c_is, x, y, -1)
-            var p = dot(c_is, y, y)
-            K[{i,j}] = cmath.exp(-p / 2*sig)
+    for i in r_is do
+        for j in r_is do
+            saxpy_2d(c_is, i, j, data, y, -1)
+            var p : float = dot(c_is, y, y)
+            kernel[{i,j}] = cmath.exp(p / (-2.0*sig))
+            --c.printf("k: %f \n", kernel[{i,j}])
         end
     end
-    return K
+    do return end
 end
 
 -- Uses the dual formulation.
--- is : column index space corresponding to number of training examples.
--- m : number of training examples.
-task svm_train_dual(is      : ispace(int1d),
-                    M       : uint64,
-                    data    : region(ispace(int2d), float),
-                    labels  : region(ispace(int1d), float),
-                    alpha   : region(ispace(int1d), float))
+-- is : row index space corresponding to number of training examples.
+-- num_rows : number of training examples.
+-- num_features : number of features in each example.
+task svm_train_dual(is           : ispace(int1d),
+                    num_rows     : uint64,
+                    num_features : int64,
+                    data         : region(ispace(int2d), float),
+                    labels       : region(ispace(int1d), float),
+                    alpha        : region(ispace(int1d), float))
 where 
     reads(data, labels, alpha), writes(alpha)
 do
-    for ii in is do
-        var i = [int](M * (c.rand() / c.RAND_MAX))
-        var K = compute_kernel(M, data)
-        var grad = region(is, float)
-        var k_ = region(is, float)
+    var ker_ispace = ispace(int2d, {x = num_rows, y = num_rows}) 
+    var K = region(ker_ispace, float) 
+    -- Fill 2D region K.
+    compute_kernel(num_rows, num_features, data, K)
+    var grad = region(is, float)
+    var k_ = region(is, float)
+    var k_c = region(is, float)
+    var lambda : float = 1.0 / (64.0 * num_rows)
+    var num_outer_loops : uint32 = 40
+    var scaling_factor : double = num_outer_loops * num_rows 
+    var alpha_avg = region(is, float)
+    fill(alpha_avg, 0.0)
+    fill(alpha, 0.0)
+    for ii = 1, num_outer_loops * num_rows do
+        var ind : uint64 = cmath.floor((num_rows * (c.rand() / (c.RAND_MAX+0.1))))
+        --c.printf("ind: %d\n", ind)
+        regentlib.assert(ind <= num_rows, "invalid index")
         for ic in is do
-            k_[ic] = 0--K[{i, ic}]
-            grad[ic] = 0--K[{i, ic}] * alpha[ic]
+            k_[ic] = K[{ind, ic}]
+            k_c[ic] = K[{ic, ind}]
+            grad[ic] = [float](num_rows * lambda * K[{ic, ind}] * alpha[ind])
         end
-        var margin = labels[i] * dot(is, k_, alpha) 
+        var margin = labels[ind] * dot(is, k_, alpha) 
         if (margin < 1) then
-            -- grad -= Y[i]*K[:,i] 
-            saxpy(is, k_, grad, -labels[i])
+            -- grad -= Y[i]*K[:,ind] 
+            saxpy(is, k_c, grad, -labels[ind])
         end
-        saxpy(is, grad, alpha, -1.0/sqrt(ii+1))
+        saxpy(is, grad, alpha, -1.0/sqrt(ii))
+        saxpy(is, alpha, alpha_avg, 1.0) 
+        --print(is, alpha)
     end
+    fill(alpha, 0.0)
+    saxpy(is, alpha_avg, alpha, (1.0 / scaling_factor))
+
+    c.printf("Print alpha ... \n")
     print(is, alpha)
 end
 
@@ -213,6 +254,52 @@ do
     print(c_is, weights)
 end
 
+-- Computes the accuracy of the kerenl SVM on the test dataset.
+-- is_c : Index space corresponding to parameter dimension.
+-- is_r : Index space corresponding to number of instances.  
+-- w : Support vector parameters.
+-- data : Sample data with n features.
+-- lables : Correct classification of corresponding data instance.  
+task svm_test_dual(c_is     : ispace(int1d),
+                   p_train  : ispace(int1d),
+                   p_test   : ispace(int1d),
+                   alpha    : region(ispace(int1d), float),
+                   data     : region(ispace(int2d), float),
+                   labels   : region(ispace(int1d), float))
+where 
+    reads(data, labels, alpha)
+do
+    var sig : float = 64.0
+    var acc : float = 0
+    var total : uint64 = 0
+    var x_ = region(c_is, float)
+    var y_ : float = 0
+    var k : float = 0
+    -- Iterate over the entire test set to compute accuracy. 
+    for ii in p_test do
+        var class : double = 0.0
+        total += 1
+        for jj in p_train do
+            saxpy_2d(c_is, ii, jj, data, x_, -1)
+            var p : float = dot(c_is, x_, x_)
+            k = cmath.exp(-p / (2*sig)) 
+            --class += (alpha[jj] * labels[jj] * k)
+            class += (alpha[jj] * k)
+            --c.printf("%2.6f   %2.6f   %2.6f  --->  %2.6f \n", alpha[jj], labels[ii], k, class)
+        end
+        if (class*labels[ii] < 1) then
+            c.printf("# %d is incorrect: %f -- %f. \n", ii, labels[ii], class)
+        else 
+            c.printf("# %d is correct: %f -- %f. \n", ii, labels[ii], class)
+            acc += 1.0 
+        end
+    end 
+    c.printf("# Correct: %f \n", acc)
+    acc = [float](acc / total)
+    c.printf("Accuracy: %f \n", acc)
+    return acc
+end
+
 -- Computes the accuracy of the SVM on the test dataset.
 -- is_c : Index space corresponding to parameter dimension.
 -- is_r : Index space corresponding to number of instances.  
@@ -222,7 +309,7 @@ end
 task svm_test(is_c     : ispace(int1d),
               is_r     : ispace(int1d),
               w        : region(ispace(int1d), float),
-              data     : region(ispace(int2d), float), -- TODO: change this to int2d
+              data     : region(ispace(int2d), float),
               labels   : region(ispace(int1d), float))
 where 
     reads(data, labels, w)
@@ -317,16 +404,21 @@ task toplevel()
     var train = 0
     var test = 1 
     var alpha = region(label_partition[train].ispace, float)
+    fill(alpha, 0.0)
+    var m_training_examples = (nrows / partitions) 
+    var n_features = ncols -- includes bias term.
     for block in data_ispace do
         if (block == [int2d]{train,0}) then
-            svm_train(col_ispace, label_partition[train].ispace, 
-                      data_partition[block], label_partition[train], weights)
-            --[[svm_train_dual(alpha.ispace, nrows, 
-                           data_partition[block], label_partition[train], alpha)--]]
+            --[[svm_train(col_ispace, label_partition[train].ispace, 
+                      data_partition[block], label_partition[train], weights)--]]
+            svm_train_dual(alpha.ispace, m_training_examples, n_features, 
+                           data_partition[block], label_partition[train], alpha)
         elseif (block == [int2d]{test,0}) then
             c.printf("Testing! %f \n", labels[0])
-            svm_test(col_ispace, label_partition[1].ispace, weights, 
-                     data_partition[block], label_partition[test])
+            --[[svm_test(col_ispace, label_partition[1].ispace, weights, 
+                     data_partition[block], label_partition[test])--]]
+            svm_test_dual(col_ispace, label_partition[train].ispace,
+                          label_partition[test].ispace, alpha, A, labels)
         end
     end
 end
