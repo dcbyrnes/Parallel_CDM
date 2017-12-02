@@ -426,6 +426,10 @@ task toplevel()
     fill(test_labels, 0.0)
     load_libsvm_format(testing_datafile, test_data, test_labels, nrows_testset, ncols_testset)
 
+    var coloring = c.legion_domain_coloring_create()
+    
+    c.legion_domain_coloring_destroy(coloring)
+
     var eta : float = 0.05
     var lam : float = 0.005
     var alpha = region(train_labels.ispace, float)
