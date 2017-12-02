@@ -10,6 +10,14 @@ sqrt = regentlib.sqrt(double)
     
 MAX_ITERS = 10
 
+fspace Cluster {
+    centroid    : int1d, -- Centroid index. 
+}
+
+terra read_index(f : &c.FILE, index : &uint64)
+  return c.fscanf(f, "%llu\n", &index[0]) == 2
+end
+
 terra get_dimensions(f : &c.FILE, d : &uint32)
     c.fscanf(f, "%d %d \n", &d[0], &d[1])
 end
@@ -426,9 +434,21 @@ task toplevel()
     fill(test_labels, 0.0)
     load_libsvm_format(testing_datafile, test_data, test_labels, nrows_testset, ncols_testset)
 
-    var coloring = c.legion_domain_coloring_create()
-    
-    c.legion_domain_coloring_destroy(coloring)
+    var cluster_mapping = "./src/clustering_results/kmeans_clustering_30.tr"
+    f_in = c.fopen(cluster_mapping, "rb")
+    var num_clusters = 8
+    var color_space = ispace(int1d, num_clusters)
+    var clusters = region(ispace(ptr, nrows), Cluster)
+    var index : uint64[1]
+    for x in clusters do
+        read_index(f_in, index)
+        x.centroid = index[0]
+        c.printf("index: %d \n", x.centroid)
+    end
+    c.fclose(f_in)
+    var cluster_partition = partition(clusters.centroid, color_space) 
+    var data_partition = image(train_data, cluster_partition, clusters.centroid)
+    do return end
 
     var eta : float = 0.05
     var lam : float = 0.005
