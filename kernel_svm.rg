@@ -7,10 +7,13 @@ local DataFile = require("libsvm_format_parser")
 local c = regentlib.c
 local cmath = terralib.includec("math.h")
 sqrt = regentlib.sqrt(double)
+pow = regentlib.pow(double)
+ceil = regentlib.ceil(double)
     
 MAX_ITERS = 10
 
 fspace Cluster {
+    id          : uint64,
     centroid    : int1d, -- Centroid index. 
 }
 
@@ -89,7 +92,7 @@ end
 
 -- Special version of saxpy where a linear combination of
 -- ROWS r1 and r2 of a 2D region are stored in y.
-__demand(__inline)
+--__demand(__inline)
 task saxpy_2d(is    : ispace(int1d),
               r1    : uint64,
               r2    : uint64,
@@ -100,10 +103,10 @@ task saxpy_2d(is    : ispace(int1d),
 where
     reads(x1, x2, y), writes(y)
 do
-    __demand(__vectorize)
+    --__demand(__vectorize)
     for i in is do 
         y[i] = x1[{r1,i}] + a*x2[{r2,i}]
-        --c.printf("%f ", x[{r2,i}])  
+        --c.printf("%f ", y[i])  
     end
     --c.printf("\n")
 end
@@ -172,62 +175,64 @@ do
         for j in r_is do
             saxpy_2d(c_is, i, j, data, data, y, -1)
             var p : float = dot(c_is, y, y)
-            kernel[{i,j}] = cmath.exp(p / (-2.0*sig))
-            --c.printf("k: %f \n", kernel[{i,j}])
+            kernel[{i,j}] = cmath.exp(p / (-2.0*pow(sig,2)))
+            c.printf("k: %f \n", kernel[{i,j}])
+            c.printf("p: %f \n", p)
         end
     end
-    do return end
 end
 
 -- Uses the dual formulation.
 -- is : row index space corresponding to number of training examples.
 -- num_rows : number of training examples.
 -- num_features : number of features in each example.
-task svm_train_dual(is           : ispace(int1d),
+task svm_train_dual(cs           : ispace(int1d),
                     num_rows     : uint64,
                     num_features : int64,
-                    data         : region(ispace(int2d), float),
+                    --data         : region(ispace(int2d), float),
                     labels       : region(ispace(int1d), float),
-                    alpha        : region(ispace(int1d), float))
+                    alpha        : region(ispace(int1d), float),
+                    K            : region(ispace(int2d), float))
 where 
-    reads(data, labels, alpha), writes(alpha)
+    --reads(data, labels, alpha, K), writes(alpha)
+    reads(labels, alpha, K), writes(alpha)
 do
-    var ker_ispace = ispace(int2d, {x = num_rows, y = num_rows}) 
-    var K = region(ker_ispace, float) 
+    --var ker_ispace = ispace(int2d, {x = num_rows, y = num_rows}) 
+    --var K = region(ker_ispace, float) 
     -- Fill 2D region K.
-    compute_kernel(num_rows, num_features, data, K)
-    var grad = region(is, float)
-    var k_ = region(is, float)
-    var k_c = region(is, float)
+    --compute_kernel(num_rows, num_features, data, K)
+    var is = ispace(int1d, num_rows)
+    var grad = region(cs, float)
+    var k_ = region(cs, float)
+    var k_c = region(cs, float)
     var lambda : float = 1.0 / (4 * num_rows)
     var num_outer_loops : uint32 = 40
     var scaling_factor : double = num_outer_loops * num_rows 
-    var alpha_avg = region(is, float)
+    var alpha_avg = region(cs, float)
     fill(alpha_avg, 0.0)
     fill(alpha, 0.0)
+
     for ii = 1, num_outer_loops * num_rows do
         var ind : uint64 = cmath.floor((num_rows * (c.rand() / (c.RAND_MAX+0.1))))
-        --c.printf("ind: %d\n", ind)
+        c.printf("ind: %d\n", ind)
         regentlib.assert(ind <= num_rows, "invalid index")
-        for ic in is do
+        for ic in cs do
             k_[ic] = K[{ind, ic}]
             k_c[ic] = K[{ic, ind}]
             grad[ic] = [float](num_rows * lambda * K[{ic, ind}] * alpha[ind])
         end
-        var margin = labels[ind] * dot(is, k_, alpha) 
+        var margin = labels[ind] * dot(cs, k_, alpha) 
         if (margin < 1) then
             -- grad -= Y[i]*K[:,ind] 
-            saxpy(is, k_c, grad, -labels[ind])
+            saxpy(cs, k_c, grad, -labels[ind])
         end
-        saxpy(is, grad, alpha, -1.0/sqrt(ii))
-        saxpy(is, alpha, alpha_avg, 1.0) 
+        saxpy(cs, grad, alpha, -1.0/sqrt(ii))
+        saxpy(cs, alpha, alpha_avg, 1.0) 
         --print(is, alpha)
     end
     fill(alpha, 0.0)
-    saxpy(is, alpha_avg, alpha, (1.0 / scaling_factor))
+    saxpy(cs, alpha_avg, alpha, (1.0 / scaling_factor))
 
-    c.printf("Print alpha ... \n")
-    print(is, alpha)
 end
 
 -- Trains a support vector machine.
@@ -295,7 +300,7 @@ do
         for jj in train_labels.ispace do
             saxpy_2d(c_is, ii, jj, testing_data, training_data, x_, -1)
             var p : float = dot(c_is, x_, x_)
-            k = cmath.exp(-p / (2*sig)) 
+            k = cmath.exp(-p / (2 * pow(sig,2))) 
             --class += (alpha[jj] * labels[jj] * k)
             class += (alpha[jj] * k)
             --c.printf("%2.6f   %2.6f   %2.6f  --->  %2.6f \n", alpha[jj], labels[ii], k, class)
@@ -383,7 +388,7 @@ do
     for i = 0, nrows do
         data_matrix[{i, ncols-1}] = 1.0
         labels[i] = datafile.instance[i].label
-        c.printf("Label: %f \n", labels[i])
+        c.printf("%d.) Label: %f \n", i, labels[i])
         for j = 0, datafile.instance[i].num_entries do
             data_matrix[{i, datafile.instance[i].indices[j]}] = datafile.instance[i].value[j]
             c.printf("%f \n", data_matrix[{i, datafile.instance[i].indices[j]}])
@@ -434,22 +439,6 @@ task toplevel()
     fill(test_labels, 0.0)
     load_libsvm_format(testing_datafile, test_data, test_labels, nrows_testset, ncols_testset)
 
-    var cluster_mapping = "./src/clustering_results/kmeans_clustering_30.tr"
-    f_in = c.fopen(cluster_mapping, "rb")
-    var num_clusters = 8
-    var color_space = ispace(int1d, num_clusters)
-    var clusters = region(ispace(ptr, nrows), Cluster)
-    var index : uint64[1]
-    for x in clusters do
-        read_index(f_in, index)
-        x.centroid = index[0]
-        c.printf("index: %d \n", x.centroid)
-    end
-    c.fclose(f_in)
-    var cluster_partition = partition(clusters.centroid, color_space) 
-    var data_partition = image(train_data, cluster_partition, clusters.centroid)
-    do return end
-
     var eta : float = 0.05
     var lam : float = 0.005
     var alpha = region(train_labels.ispace, float)
@@ -459,8 +448,50 @@ task toplevel()
     var m_testing_examples = nrows_testset 
     var n_features = ncols -- includes bias term.
 
-    svm_train_dual(alpha.ispace, m_training_examples, n_features, train_data, 
-                   train_labels, alpha)
+    var cluster_mapping = "./src/clustering_results/kmeans_clustering_30_fake.tr"
+    f_in = c.fopen(cluster_mapping, "rb")
+    var num_clusters = 8
+    var clusters = region(ispace(ptr, nrows), Cluster)
+    var index : uint64[1]
+    var idx = 0
+    for x in clusters do
+        read_index(f_in, index)
+        x.id = idx
+        x.centroid = index[0]
+        c.printf("index: %d \n", x.centroid)
+        idx += 1
+    end
+    c.fclose(f_in)
+    var colors = ispace(int1d, num_clusters)
+    var cluster_partition = partition(clusters.centroid, colors) 
+    --[[
+    var data_partition = image(train_data, cluster_partition, clusters.centroid)
+    var label_partition = partition(disjoint, train_labels, colors)
+    var alpha_partition = image(alpha, cluster_partition, clusters.centroid)
+
+    for color in cluster_partition.colors do
+        for cent in label_partition[color] do
+            --c.printf("%d --> %d) centroid: %d \n", cent, cent.id, cent.centroid)
+            c.printf("%d) centroid: %f \n", cent, label_partition[cent])
+        end
+        c.printf("\n")
+    end
+    --]]
+
+    var kernel_ispace = ispace(int2d, {x = nrows, y = nrows}) 
+    var kernel = region(kernel_ispace, float) 
+    -- Fill 2D region K.
+    compute_kernel(nrows, n_features, train_data, kernel)
+
+    --[[for color in cluster_partition.colors do
+        svm_train_dual(alpha_partition[color].ispace, ceil(m_training_examples / num_clusters), 
+                       n_features, label_partition[color], 
+                       alpha_partition[color], kernel)
+    end--]]
+    c.printf("Print alpha ... \n")
+    print(alpha.ispace, alpha)
+    svm_train_dual(alpha.ispace, m_training_examples, n_features, 
+                   train_labels, alpha, kernel)
     svm_test_dual(col_ispace, alpha, train_data, test_data, train_labels, test_labels)
 end
 

@@ -15,7 +15,7 @@ def load_data(datafile):
 if __name__ == '__main__':
     filename = \
     '/Users/danielbyrnes/regent_install/' \
-    'legion/language/project/Parallel_SVM/data/ijcnn1.tr'
+    'legion/language/project/Parallel_SVM/data/toy_examples/ijcnn1.tr'
     data, labels = load_data(filename)
     #print(data)
     #print(labels)
