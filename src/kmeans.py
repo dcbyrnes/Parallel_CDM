@@ -3,7 +3,7 @@ import random
 
 MAX_ITER = 30
 EPS = 0.01
-
+                
 def update_colors(data, centroids, k):
     ## Iterate over all data points and find closest centroid. 
     ## Assigned color corresponds to closest centroid. 
@@ -12,7 +12,7 @@ def update_colors(data, centroids, k):
     for i in range(m):
         min_norm = float("inf")
         for j in range(k):
-            norm = np.linalg.norm(data[i,:].toarray() - centroids[j,:], 2)
+            norm = np.linalg.norm((data[i,:].toarray() - centroids[j,:]), 2)
             if (norm < min_norm):
                 min_norm = norm
                 colors[i] = j

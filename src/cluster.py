@@ -27,8 +27,8 @@ if __name__ == '__main__':
     colors = np.ravel(colors)
     np.savetxt('clustering_results/kmeans_centroids_30.tr', centroids, '%1.4e')
     np.savetxt('clustering_results/kmeans_clustering_30.tr', colors, '%1.0f')
-    '''
     plt.hist(colors)
+    '''
     plt.figure()
     lda = LDA(n_components = 2)
     lda_trans = pd.DataFrame(lda.fit_transform(data.toarray(), colors))
@@ -42,6 +42,24 @@ if __name__ == '__main__':
     plt.scatter(lda_trans[colors==7][0], lda_trans[colors==7][1], label='Class 8', c='purple') 
     plt.legend(loc=2)
 
+    '''
     plt.show()
-   '''
+
+    test_filename = \
+    '/Users/danielbyrnes/regent_install/' \
+    'legion/language/project/Parallel_SVM/data/toy_examples/ijcnn1.t'
+    test_data, test_labels = load_data(test_filename)
+    # Centroids are ordered by 'color' assignment.
+    # Assign test data instances to the nearest centroid.
+    colors = kmeans.update_colors(test_data, centroids, k)
+    colors = np.ravel(colors)
+    np.savetxt('clustering_results/kmeans_clustering_30.t', colors, '%1.0f')
+
+
+
+
+
+
+
+
    

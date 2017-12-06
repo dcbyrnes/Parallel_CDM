@@ -218,7 +218,7 @@ do
         regentlib.assert(ind <= num_rows, "invalid index")
         var random_index : int1d = ind 
         random_index = valid_idx[random_index]
-        c.printf("random idx: %d \n",random_index)
+        --c.printf("random idx: %d \n",random_index)
         scale = num_rows * lambda * problem_data[random_index].alpha
         var margin : float = 0  
         var idx : uint64 = 0
@@ -304,6 +304,7 @@ do
     --var test_ispace(int1d, num_test_cases)
     --var train_ispace(int1d, num_training_instances)
     var sig : float = 0.5
+    var total_correct : float = 0
     var acc : float = 0
     var total : uint64 = 0
     var x_ = region(column_ispace, float)
@@ -321,17 +322,17 @@ do
             class += (problem_data[jj].alpha * k)
             --c.printf("%2.6f   %2.6f   %2.6f  --->  %2.6f \n", alpha[jj], labels[ii], k, class)
         end
-        if (class * test_data[ii].label < 0) then
+        if (class * test_data[ii].label <= 0) then
             c.printf("# %d is incorrect: %f -- %f. \n", ii, test_data[ii].label, class)
         else 
             c.printf("# %d is correct: %f -- %f. \n", ii, test_data[ii].label, class)
-            acc += 1.0 
+            total_correct += 1.0 
         end
     end 
-    c.printf("# Correct: %f \n", acc)
-    acc = [float](acc / total)
+    c.printf("# Correct: %f \n", total_correct)
+    acc = [float](total_correct / total)
     c.printf("Accuracy: %f \n", acc)
-    return acc
+    return total_correct
 end
 
 -- Computes the accuracy of the SVM on the test dataset.
@@ -488,7 +489,7 @@ task toplevel()
         read_index(f_in, index)
         clx.centroid = index[0]
         clx.id = idx
-        c.printf("clx: %d \n", clx.centroid)
+        --c.printf("clx: %d \n", clx.centroid)
         idx += 1
     end
     c.fclose(f_in)
@@ -508,15 +509,17 @@ task toplevel()
         c.printf("part size: %d \n", partition_sizes[color])
     end 
    
-    var kernel_matrix = region(ispace(int2d, {x = nrows, y = nrows}), float) 
+    var kernel_matrix = region(ispace(int2d, {x = nrows, y = nrows}), float)
+    var kernel_colors = ispace(int2d, {x = num_clusters, y = 1}) 
+    var kernel_partition = partition(equal, kernel_matrix, kernel_colors)
+    var equal_data_partition = partition(equal, problem_data, colors)
     -- Fill 2D region K.
     --compute_kernel(nrows, n_features, problem_data)
-    for color in data_partition.colors do
-        compute_kernel(n_features, data_partition[color], kernel_matrix)
+    for color in kernel_partition.colors do
+        compute_kernel(n_features, equal_data_partition[color.x], kernel_partition[color])
         c.printf("%d go!\n", color)
     end
 
-    --svm_train_dual(m_training_examples, n_features, problem_data)
     var valid_idx = region(ispace(int1d, nrows), uint64)
     var i_ = 0
     for color in data_partition.colors do
@@ -524,24 +527,44 @@ task toplevel()
         fill(valid_idx, 0)
         for x in cluster_partition[color] do
             valid_idx[i_] = x.id
-            c.printf("p: %d \n", valid_idx[i_])
+            --c.printf("p: %d \n", valid_idx[i_])
             i_ += 1
         end
         svm_train_dual(valid_idx, partition_sizes[color], n_features, 
                         data_partition[color], kernel_matrix)
     end
     
+    --[[
     c.printf("Print alpha ... \n")
     for inst in problem_data do
         c.printf("alpha: %f \n", inst.avg_alpha)
     end
+    --]]
 
-    --svm_test_dual(n_features, m_training_examples, m_testing_examples, 
-    --              problem_data, test_problem_data)
-    for color in data_partition.colors do
-        svm_test_dual(n_features, m_training_examples, m_testing_examples, 
-                    data_partition[color], test_problem_data)
+    -- Assign test instances to clusters. 
+    var testset_cluster_mapping = "./src/clustering_results/kmeans_clustering_30_fake.t"
+    f_in = c.fopen(testset_cluster_mapping, "rb")
+    idx = 0
+    for instance in test_problem_data do
+        read_index(f_in, index)
+        instance.id = idx
+        instance.centroid = index[0]
+        idx += 1
     end
+    c.fclose(f_in)
+    var test_data_partition = partition(test_problem_data.centroid, colors) 
+    
+    var total_correct = region(ispace(int1d, num_clusters), uint64)
+    fill(total_correct, 0)
+    for color in data_partition.colors do
+        total_correct[color] = svm_test_dual(n_features, m_training_examples, m_testing_examples,                                            data_partition[color], test_data_partition[color])
+    end
+    var accuracy : float = 0
+    for x in total_correct do
+        accuracy += total_correct[x]
+    end
+    accuracy = [float](accuracy / m_testing_examples)
+    c.printf("\n Complete Accuracy: %f \n", accuracy)
 end
 
 regentlib.start(toplevel)
