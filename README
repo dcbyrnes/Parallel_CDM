@@ -3,9 +3,7 @@ CS 315B Final Project
 Author: Daniel C. Byrnes
 
 INTRO:
-This project explores the use of the clustering algorithms K-means and kernel K-means for partitioning the 
-training and test datasets to enable distributed SVMs. This scheme was shown to lower training time while
-preserving the predictive quality of the SVM classifier.  
+This project explores the use of the clustering algorithms K-means and kernel K-means for partitioning the training and test datasets to enable distributed SVMs. This scheme was shown to lower training time while preserving the predictive quality of the SVM classifier.  
 
 INSTRUCTIONS:
 
