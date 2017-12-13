@@ -1,2 +1,23 @@
-# parallel_svm
-Parallel support vector machine
+Data Partitioning for Distributed Support Vector Machines
+CS 315B Final Project
+Author: Daniel C. Byrnes
+
+INTRO:
+This project explores the use of the clustering algorithms K-means and kernel K-means for partitioning the 
+training and test datasets to enable distributed SVMs. This scheme was shown to lower training time while
+preserving the predictive quality of the SVM classifier.  
+
+INSTRUCTIONS:
+
+1. The file 'partitions' in the 'src' folder contains data partitions for the training and test ijcnn1 datasets. 
+If you wish to re-cluster the data using K-means clustering then from the 'src' folder type type
+    >> 'python cluster.py'
+
+Note: open-source kernel K-means code was used for the kernel K-means partitioning. That code can be found here https://gist.github.com/mblondel/6230787.
+
+
+2. The distributed SVM code requires that you have Regent installed on your computer. 
+Instructions for installing Regent can be found here: https://web.stanford.edu/class/cs315b/assignment0.html.
+To run the distributed SVM program enter: 
+    >> './regent.py clustered_svm.rg'
+
